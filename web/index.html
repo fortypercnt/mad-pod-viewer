@@ -1,0 +1,831 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mad Pod Racing Viewer</title>
+<style>
+:root {
+  --bg: #15171c; --panel: #1e2128; --panel2: #262a33; --line: #343945;
+  --ink: #e8e9ec; --ink2: #a9adb7; --muted: #737987;
+  --p0: #f5a332; --p1: #ff3d6e; --accent: #5aa9ff; --bad: #ff5a5a; --good: #4cc38a;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); font: 13px/1.4 system-ui, "Segoe UI", sans-serif; }
+button, input, select { font: inherit; color: var(--ink); background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 5px 9px; }
+button { cursor: pointer; }
+button:hover { border-color: var(--muted); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #0b1220; font-weight: 600; }
+button:disabled { opacity: .5; cursor: default; }
+input[type=number] { width: 70px; }
+.mono { font-family: Consolas, "Cascadia Mono", monospace; }
+header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+header .grp { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+header label { color: var(--ink2); }
+.bot-in { width: 260px; }
+#dir { color: var(--muted); font-size: 12px; }
+.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
+#status { color: var(--ink2); }
+#status.err { color: var(--bad); }
+main { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 12px; padding: 12px 16px; }
+@media (max-width: 1100px) { main { grid-template-columns: 1fr; } }
+#stage { position: relative; width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 8px; overflow: hidden; }
+/* fullscreen: the board fills the screen (16:9, black bars where the screen's shape differs); the playback controls
+   float over its bottom edge, half transparent until the mouse is on them; options and the timing chart are hidden */
+#player:fullscreen { background: #000; padding: 0; position: relative; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+#player:fullscreen #stage { width: min(100vw, calc(100vh * 16 / 9)); border-radius: 0; }
+#player:fullscreen .opts, #player:fullscreen #timechart { display: none; }
+#player:fullscreen .controls {
+  position: absolute; margin: 0; padding: 8px 12px; box-sizing: border-box;
+  width: min(100vw, calc(100vh * 16 / 9)); left: 50%; transform: translateX(-50%);
+  bottom: max(0px, calc((100vh - 100vw * 9 / 16) / 2));
+  background: rgba(10, 12, 16, .45); opacity: .6; transition: opacity .2s;
+}
+#player:fullscreen .controls:hover, #player:fullscreen .controls:focus-within { opacity: 1; }
+#cv { width: 100%; height: 100%; display: block; }
+#empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--ink2); font-size: 15px; background: rgba(0,0,0,.35); }
+.controls { display: flex; gap: 6px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+.controls input[type=range] { flex: 1; min-width: 160px; accent-color: var(--accent); }
+#turnlbl { min-width: 110px; text-align: right; }
+.opts { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 6px; color: var(--ink2); }
+.opts label { display: flex; gap: 4px; align-items: center; cursor: pointer; }
+#timechart { width: 100%; height: 60px; display: block; margin-top: 8px; background: var(--panel); border-radius: 6px; cursor: pointer; }
+aside { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+.card h3 { margin: 0 0 6px; font-size: 13px; display: flex; gap: 8px; align-items: center; }
+.card h3 .sub { margin-left: auto; color: var(--ink2); font-weight: 400; }
+.io { font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; white-space: pre; overflow-x: auto; background: var(--bg); border-radius: 4px; padding: 4px 6px; margin: 3px 0 6px; }
+.io.err { max-height: 180px; overflow-y: auto; color: #c9c2a8; }
+.k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+table.pods { width: 100%; border-collapse: collapse; font-size: 12px; }
+table.pods th, table.pods td { padding: 2px 4px; text-align: right; white-space: nowrap; }
+table.pods th { color: var(--muted); font-weight: 500; }
+table.pods td:first-child, table.pods th:first-child { text-align: left; }
+#gameinfo { color: var(--ink2); }
+#gameinfo b { color: var(--ink); }
+.warn { color: var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <div class="grp">
+    <span class="dot" style="background:var(--p0)"></span>
+    <input id="botA" class="bot-in mono" list="cmdlist" placeholder="command of bot A, e.g. python bot.py" spellcheck="false">
+  </div>
+  <button id="swap" title="Swap sides">⇄</button>
+  <div class="grp">
+    <span class="dot" style="background:var(--p1)"></span>
+    <input id="botB" class="bot-in mono" list="cmdlist" placeholder="command of bot B, e.g. ./bot.exe" spellcheck="false">
+  </div>
+  <div class="grp">
+    <label for="seed">seed</label><input id="seed" type="number" placeholder="random" style="width:110px">
+    <button id="play" class="primary">Play game</button>
+  </div>
+  <div class="grp">
+    <select id="replays" style="max-width:360px"><option value="">Saved replays…</option></select>
+    <button id="reload" title="Refresh the list">↻</button>
+  </div>
+  <span id="status"></span>
+  <span id="dir"></span>
+  <datalist id="cmdlist"></datalist>
+</header>
+<main>
+  <section id="player">
+    <div id="stage"><canvas id="cv"></canvas><div id="empty">Enter two bot commands and press “Play game”, or open a saved replay.</div></div>
+    <div class="controls">
+      <button id="bStart" title="First turn (Home)">⏮</button>
+      <button id="bPrev" title="Previous turn (←)">◀</button>
+      <button id="bPlay" title="Play / pause (space)" style="min-width:44px">▶</button>
+      <button id="bNext" title="Next turn (→)">▶|</button>
+      <button id="bEnd" title="Last turn (End)">⏭</button>
+      <input id="slider" type="range" min="0" max="0" step="0.001" value="0">
+      <span id="turnlbl" class="mono">–</span>
+      <select id="speed" title="Playback speed (x1 = 6 turns per second)">
+        <option value="0.1">x0.1</option><option value="0.5">x0.5</option><option value="1" selected>x1</option>
+        <option value="2">x2</option><option value="5">x5</option><option value="10">x10</option>
+      </select>
+      <button id="bFull" title="Fullscreen (F)">⛶</button>
+    </div>
+    <div class="opts">
+      <label><input type="checkbox" id="oTrails" checked> trails</label>
+      <label><input type="checkbox" id="oThrust" checked> thrust arrows</label>
+      <label><input type="checkbox" id="oHit"> hitboxes</label>
+      <label><input type="checkbox" id="oTarget"> output targets</label>
+      <label><input type="checkbox" id="oNames" checked> pod names</label>
+      <label><input type="checkbox" id="oRank"> race positions</label>
+      <label><input type="checkbox" id="oMsg" checked> messages</label>
+      <label><input type="checkbox" id="oFx" checked> effects</label>
+      <span style="margin-left:auto;color:var(--muted)">wheel: zoom · drag: pan · double-click: reset · space / ← → : play / step · F: fullscreen</span>
+    </div>
+    <canvas id="timechart" title="Time per turn (click to jump)"></canvas>
+  </section>
+  <aside>
+    <div class="card"><div id="gameinfo">No game loaded.</div></div>
+    <div class="card"><table class="pods" id="podtable"></table></div>
+    <div class="card" id="pl0"></div>
+    <div class="card" id="pl1"></div>
+  </aside>
+</main>
+<script src="/sim.js"></script>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const W = 16000, H = 9000;
+const CG_FIRST_TURN_MS = 1000, CG_TURN_MS = 75;   // CodinGame's response time limits (only reported here, not enforced)
+const COLORS = ["#f5a332", "#ff3d6e"];   // player 1 orange, player 2 red
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("podviewer." + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem("podviewer." + k, JSON.stringify(v)); } catch {} },
+};
+
+// ---------------------------------------------------------------------------------------------- sprites
+const sheet = new Image(); sheet.src = "/assets/spritesheet.png";
+const bg = new Image(); bg.src = "/assets/background.jpg";
+const SPR = {
+  cp: [2, 619, 317, 309], cpCenter: [133, 133], cpRadiusPx: 100,
+  engine: [[[1222, 1202, 38, 77], [1316, 1296, 38, 77]],    // per team (orange, red): [left, right] thruster
+           [[983, 713, 51, 75], [983, 619, 51, 75]]],
+  flag: [757, 929, 161, 120],                               // inside checkpoint 0
+  capsule: [[986, 798, 50, 79], [1360, 1296, 45, 74]],
+  shield: [[1045, 408, 186, 186], [1045, 221, 186, 186]],
+  // checkpoint machine next to each checkpoint; its two lamps (left: player 1, right: player 2) light up on a pass
+  machine: [475, 929, 281, 172], lamps: [[61.8, 111.6], [145.5, 117]], lampRadiusPx: 22,
+  lampFxCentre: [[-1.6, -0.3], [-5.2, 1.4]],   // glow centre relative to the frame centre, in frame pixels
+  pipeEnd: [213, 31],                          // right end of the machine's main pipe
+  lampFx: [Array.from({ length: 14 }, (_, k) => [94 * k, 1296, 93, 80]),                  // yellow-orange
+           Array.from({ length: 13 }, (_, k) => [94 * k, 1108, 93, 93])
+             .concat(Array.from({ length: 13 }, (_, k) => [94 * k, 1202, 93, 93]))],     // red-pink
+  beam: [[763, 1062, 41, 26], [816, 1065, 37, 23], [866, 1063, 39, 24], [918, 1065, 37, 23], [968, 1065, 38, 23],
+         [7, 1389, 39, 26], [58, 1392, 39, 23], [109, 1390, 39, 24]],                     // electric arcs
+  glow: [154, 1378, 29, 29],                                                             // exhaust particle
+  spark: [186, 1377, 7, 28],                                                             // white streak: collision sparks
+  target: [1045, 595, 185, 181],
+};
+[sheet, bg].forEach((im) => im.addEventListener("load", () => draw()));
+
+// ---------------------------------------------------------------------------------------------- game model
+let G = null;      // loaded replay with derived data
+let T = 0;         // playback position in turns (float)
+let playing = false;
+
+function parsePods(lines, first) {
+  const s = { x: [], y: [], vx: [], vy: [], angle: [], next: [], first };
+  for (const l of lines) {
+    const v = l.trim().split(/\s+/).map(Number);
+    s.x.push(v[0]); s.y.push(v[1]); s.vx.push(v[2]); s.vy.push(v[3]);
+    // csbref does not normalise angles (-1 is 359), except on the first turn, where -1 means "no heading yet"
+    s.angle.push(first && v[4] === -1 ? -1 : ((v[4] % 360) + 360) % 360); s.next.push(v[5]);
+  }
+  return s;
+}
+
+function prepare(log) {
+  const cps = log.checkpoints, ncp = cps.length, laps = log.laps || 3;
+  const states = log.turns.map((t, k) => parsePods(t.in[0], k === 0));
+  const extras = [0, 1, 2, 3].map(() => ({ shieldTimer: 0, boostUsed: false }));
+  const sims = [], acts = [], podInfo = [];
+  let mismatches = 0, firstMismatch = -1;
+  const passed = [0, 0, 0, 0];
+  const lastCp = [0, 0];       // turn of each player's last checkpoint
+  for (let k = 0; k < states.length; k++) {
+    const t = log.turns[k];
+    const a = [...t.out[0], ...(t.out[1] || ["", ""])].map(SIM.parseOutput);
+    acts.push(a);
+    podInfo.push({ passed: passed.slice(), extras: extras.map((e) => ({ ...e })), timeout: lastCp.map((l) => 100 - (k - l)) });
+    if (k > 0) states[k].exact = sims[k - 1].end.exact;
+    const sim = SIM.turn(states[k], a, extras, cps);
+    sims.push(sim);
+    for (let i = 0; i < 4; i++) {
+      if (k + 1 < states.length) {
+        const n = states[k + 1];
+        const gotNext = n.next[i], prev = states[k].next[i];
+        const d = (gotNext - prev + ncp) % ncp;
+        passed[i] += d;
+        if (d) lastCp[i >> 1] = k;     // passing during turn k: 99 turns left after it, like the referee
+        if (n.x[i] !== sim.end.x[i] || n.y[i] !== sim.end.y[i] || n.vx[i] !== sim.end.vx[i] || n.vy[i] !== sim.end.vy[i] ||
+            n.angle[i] !== sim.end.angle[i] || n.next[i] !== sim.end.next[i]) {
+          mismatches++; if (firstMismatch < 0) firstMismatch = k;
+        }
+      } else {
+        passed[i] += sim.passed[i];
+        if (sim.passed[i]) lastCp[i >> 1] = k;
+      }
+    }
+  }
+  // the final frame (after the last turn) comes from the simulation only
+  const last = sims[sims.length - 1];
+  states.push(last ? { ...last.end } : states[states.length - 1]);
+  podInfo.push({ passed: passed.slice(), extras: extras.map((e) => ({ ...e })), timeout: lastCp.map((l) => 100 - (states.length - 1 - l)) });
+  // trails: positions per turn
+  const trail = states.map((s) => ({ x: s.x, y: s.y }));
+  const ms = log.turns.map((t) => t.ms);
+  let reason = "";
+  const total = laps * ncp;
+  const fin = passed.map((p) => p >= total);
+  if (log.winner >= 0) {
+    if (fin[2 * log.winner] || fin[2 * log.winner + 1]) reason = "finished the race";
+    else if (podInfo[podInfo.length - 1].timeout[1 - log.winner] <= 0) reason = "opponent timed out (100 turns without a checkpoint)";
+    else if (/no answer within/.test(log.note)) reason = "opponent took too long (" + log.note + ")";
+    else if (/died|no output|exited/.test(log.note)) reason = "opponent stopped answering";
+    else reason = "";
+  }
+  // checkpoint passes (the referee only counts a checkpoint that was the pod's target): time in turns, per checkpoint
+  const cpEvents = cps.map(() => [[], []]);
+  sims.forEach((sim, k) => sim.passes.forEach((e) => cpEvents[e.cp][e.i >> 1].push(k + e.t)));
+  // heading change per pod and turn (display only: exhaust while turning)
+  const turnBy = sims.map((sim, k) => [0, 1, 2, 3].map((i) => {
+    const s = states[k];
+    if (s.angle[i] === -1) return 0;
+    const a0 = s.exact ? s.exact[i] : s.angle[i];
+    return ((sim.end.exact[i] - a0) % 360 + 540) % 360 - 180;
+  }));
+  return { log, cps, ncp, laps, total, states, sims, acts, podInfo, trail, ms, mismatches, firstMismatch, reason, cpEvents, turnBy,
+           nTurns: log.turns.length };
+}
+
+// ---------------------------------------------------------------------------------------------- drawing
+const cv = $("cv"), ctx = cv.getContext("2d");
+function resize() {
+  const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
+  drawChart(); draw();
+}
+new ResizeObserver(resize).observe($("stage"));
+
+// camera: wheel zooms around the cursor, drag pans, double-click resets
+const view = { zoom: 1, cx: W / 2, cy: H / 2 };
+function clampView() {
+  view.zoom = Math.max(1, Math.min(12, view.zoom));
+  const hw = W / 2 / view.zoom, hh = H / 2 / view.zoom;
+  view.cx = Math.max(hw - 2000, Math.min(W - hw + 2000, view.cx));
+  view.cy = Math.max(hh - 2000, Math.min(H - hh + 2000, view.cy));
+  if (view.zoom === 1) { view.cx = W / 2; view.cy = H / 2; }
+}
+function toWorld(e) {
+  const r = cv.getBoundingClientRect(), s = W / view.zoom / r.width;
+  return [view.cx + (e.clientX - r.left - r.width / 2) * s, view.cy + (e.clientY - r.top - r.height / 2) * s];
+}
+cv.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const [wx, wy] = toWorld(e);
+  const z = view.zoom * Math.exp(-e.deltaY * 0.0015);
+  const nz = Math.max(1, Math.min(12, z));
+  view.cx = wx - (wx - view.cx) * view.zoom / nz; view.cy = wy - (wy - view.cy) * view.zoom / nz;
+  view.zoom = nz; clampView(); draw();
+}, { passive: false });
+let drag = null;
+cv.addEventListener("pointerdown", (e) => { drag = { x: e.clientX, y: e.clientY, cx: view.cx, cy: view.cy }; cv.setPointerCapture(e.pointerId); });
+cv.addEventListener("pointermove", (e) => {
+  if (!drag) return;
+  const s = W / view.zoom / cv.getBoundingClientRect().width;
+  view.cx = drag.cx - (e.clientX - drag.x) * s; view.cy = drag.cy - (e.clientY - drag.y) * s;
+  clampView(); draw();
+});
+cv.addEventListener("pointerup", () => { drag = null; });
+cv.addEventListener("dblclick", () => { view.zoom = 1; clampView(); draw(); });
+
+function sprite(r, x, y, w, h, rot = 0, alpha = 1) {
+  if (!sheet.complete) return;
+  ctx.save(); ctx.translate(x, y); if (rot) ctx.rotate(rot); ctx.globalAlpha = alpha;
+  ctx.drawImage(sheet, r[0], r[1], r[2], r[3], -w / 2, -h / 2, w, h);
+  ctx.restore();
+}
+
+// pod layout in its own frame (facing +x), scaled so the whole pod fits inside the 400-unit hitbox
+// Proportions taken from the CodinGame viewer: big thrusters close in front of the capsule, the pod spanning about
+// 640 of the 800-unit hitbox. Player 1's thruster corners lie on the hitbox circle; both teams use the same scale.
+const POD = { engineX: 165, engineY: 155, engineH: 310, capsuleX: -220, capsuleH: 290 };
+POD.nozzleX = POD.engineX - POD.engineH / 2;
+POD.scale = (() => {
+  const e = SPR.engine[0][0], halfW = POD.engineH * e[2] / e[3] / 2;
+  const sc = 400 / Math.hypot(POD.engineX + POD.engineH / 2, POD.engineY + halfW);
+  return [sc * 1.1, sc * 1.1];   // 10% larger than the fit, as asked
+})();
+
+// thruster angle relative to the pod (degrees, + = clockwise on screen): the heading change of the turn being played,
+// eased in from the previous turn's over the first 60% of the turn. Display only.
+function thrusterYaw(k, f, i) {
+  if (!G.nTurns) return 0;
+  const at = (kk) => (kk < 0 ? 0 : Math.max(-18, Math.min(18, G.turnBy[Math.min(kk, G.nTurns - 1)][i])));
+  if (k >= G.nTurns) return at(G.nTurns - 1);
+  const u = Math.min(1, f / 0.6), e = u * u * (3 - 2 * u);   // smoothstep over the first 60% of the turn
+  return at(k - 1) + (at(k) - at(k - 1)) * e;
+}
+
+function lerpAngle(a, b, f) { let d = ((b - a) % 360 + 540) % 360 - 180; return a + d * f; }
+
+function podPose(k, f, i) {
+  const s = G.states[k];
+  if (k >= G.nTurns) return { x: s.x[i], y: s.y[i], a: s.angle[i] };
+  const sim = G.sims[k];
+  const [x, y] = SIM.posAt(sim, i, f);
+  const a0 = s.angle[i] === -1 ? sim.end.exact[i] : (s.exact ? s.exact[i] : s.angle[i]);
+  // display only: the heading turns smoothly over the whole turn (the referee turns it at once at the start)
+  return { x, y, a: lerpAngle(a0, sim.end.exact[i], Math.min(1, f)) };
+}
+
+function draw() {
+  const cw = cv.width, ch = cv.height;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, cw, ch);
+  const sc = cw / W * view.zoom;
+  ctx.setTransform(sc, 0, 0, sc, cw / 2 - view.cx * sc, ch / 2 - view.cy * sc);
+  if (bg.complete && bg.naturalWidth) ctx.drawImage(bg, 0, 0, W, H);
+  if (!G) return;
+  const k = Math.min(Math.floor(T), G.nTurns), f = k >= G.nTurns ? 0 : T - k;
+  const info = G.podInfo[k];
+
+  // checkpoints
+  const cpSize = (SPR.cp[2] * 600) / SPR.cpRadiusPx;
+  const cpOffX = (SPR.cp[2] / 2 - SPR.cpCenter[0]) * 600 / SPR.cpRadiusPx, cpOffY = (SPR.cp[3] / 2 - SPR.cpCenter[1]) * 600 / SPR.cpRadiusPx;
+  const MU = 5.6;   // world units per machine sprite pixel (pipe length vs. checkpoint size as on CodinGame)
+  G.cps.forEach(([x, y], c) => {
+    // the right end of the main pipe (sprite pixel SPR.pipeEnd) sits on the checkpoint's left edge, at its centre height
+    const m = SPR.machine;
+    const mx = x - 600 - (SPR.pipeEnd[0] - m[2] / 2) * MU, my = y - (SPR.pipeEnd[1] - m[3] / 2) * MU;
+    sprite(m, mx, my, m[2] * MU, m[3] * MU);
+    for (let team = 0; team < 2; team++) {
+      const lx = mx + (SPR.lamps[team][0] - m[2] / 2) * MU, ly = my + (SPR.lamps[team][1] - m[3] / 2) * MU;
+      let last = -1;
+      for (const t of G.cpEvents[c][team]) if (t <= T) last = t;
+      if (last < 0) continue;
+      const age = T - last, LIT = 3;     // turns the lamp shows the flash (1 at full brightness, then the fade), then dark
+      if (age >= LIT) continue;
+      const frames = SPR.lampFx[team];
+      const fr = frames[Math.min(frames.length - 1, Math.floor(age / LIT * frames.length))];
+      const size = SPR.lampRadiusPx * MU * 3.85;   // flash 20% larger than the first version
+      ctx.save(); ctx.globalCompositeOperation = "lighter";
+      const FADE = 2;     // turns of fade-out at the end of the flash
+      ctx.globalAlpha = Math.min(1, (LIT - age) / FADE);
+      // clip to a circle around the lamp so the black frame border stays invisible
+      ctx.beginPath(); ctx.arc(lx, ly, SPR.lampRadiusPx * MU * 1.92, 0, Math.PI * 2); ctx.clip();
+      const k2 = size / fr[2], [ox, oy] = SPR.lampFxCentre[team];   // shift so the glow centre is on the lamp
+      ctx.drawImage(sheet, fr[0], fr[1], fr[2], fr[3], lx - size / 2 - ox * k2, ly - fr[3] * k2 / 2 - oy * k2, size, fr[3] * k2);
+      ctx.restore();
+    }
+  });
+  G.cps.forEach(([x, y], c) => {
+    sprite(SPR.cp, x + cpOffX, y + cpOffY, cpSize, cpSize * SPR.cp[3] / SPR.cp[2]);
+    if (c === 0) {
+      sprite(SPR.flag, x + 20, y, 900, 900 * SPR.flag[3] / SPR.flag[2]);
+    } else {
+      sprite(SPR.target, x, y, 1150, 1150 * SPR.target[3] / SPR.target[2], 0, .9);
+      ctx.fillStyle = "rgba(255,255,255,.95)"; ctx.font = "bold 420px system-ui, sans-serif";
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText(String(c), x, y + 20);
+    }
+  });
+  // next-checkpoint markers for each player's pods
+  const st = G.states[k];
+  if ($("oFx").checked) for (let i = 0; i < 4; i++) {
+    const [cx, cy] = G.cps[st.next[i]];
+    ctx.strokeStyle = COLORS[i >> 1]; ctx.globalAlpha = .55; ctx.lineWidth = 40;
+    ctx.setLineDash([180, 120]); ctx.lineDashOffset = (i & 1) * 150;
+    ctx.beginPath(); ctx.arc(cx, cy, 640 + 60 * i, 0, Math.PI * 2); ctx.stroke();
+    ctx.setLineDash([]); ctx.globalAlpha = 1;
+  }
+
+  const poses = [0, 1, 2, 3].map((i) => podPose(k, f, i));
+  // race positions, ordered like the referee: checkpoints passed, then distance to the next checkpoint; passes within
+  // the current turn count from the moment the pod crosses
+  const ranks = (() => {
+    const key = [0, 1, 2, 3].map((i) => {
+      let passed = info.passed[i], next = G.states[k].next[i];
+      if (k < G.nTurns) for (const e of G.sims[k].passes) if (e.i === i && e.t <= f) { passed++; next = (next + 1) % G.ncp; }
+      const [cx, cy] = G.cps[next];
+      return { i, passed, d: Math.hypot(poses[i].x - cx, poses[i].y - cy) };
+    });
+    key.sort((a, b) => b.passed - a.passed || a.d - b.d);
+    const r = [];
+    key.forEach((e, n) => { r[e.i] = n + 1; });
+    return r;
+  })();
+
+  // trails
+  if ($("oTrails").checked) {
+    for (let i = 0; i < 4; i++) {
+      ctx.strokeStyle = COLORS[i >> 1]; ctx.lineWidth = 30; ctx.lineCap = "round"; ctx.lineJoin = "round";
+      const from = Math.max(0, k - 25);
+      ctx.beginPath();
+      for (let j = from; j <= k; j++) {
+        ctx.globalAlpha = 1;
+        if (j === from) ctx.moveTo(G.trail[j].x[i], G.trail[j].y[i]); else ctx.lineTo(G.trail[j].x[i], G.trail[j].y[i]);
+      }
+      ctx.lineTo(poses[i].x, poses[i].y);
+      ctx.globalAlpha = .45; ctx.stroke(); ctx.globalAlpha = 1;
+    }
+  }
+
+  // output targets
+  if ($("oTarget").checked && k < G.nTurns) {
+    for (let i = 0; i < 4; i++) {
+      const a = G.acts[k][i];
+      ctx.strokeStyle = COLORS[i >> 1]; ctx.lineWidth = 18; ctx.globalAlpha = .6; ctx.setLineDash([120, 90]);
+      ctx.beginPath(); ctx.moveTo(G.states[k].x[i], G.states[k].y[i]); ctx.lineTo(a.x, a.y); ctx.stroke();
+      ctx.setLineDash([]); ctx.globalAlpha = 1;
+      sprite(SPR.target, a.x, a.y, 500, 490, 0, .8);
+    }
+  }
+
+  // exhaust: particles left behind by each engine, emitted in proportion to the thrust; with no thrust, a turn still
+  // puffs a little from the outer engine (right engine for a left turn). Display only.
+  if ($("oFx").checked) {
+    const STEP = 0.04, WINDOW = 2.6, g = SPR.glow;
+    ctx.save(); ctx.globalCompositeOperation = "lighter";
+    for (let i = 0; i < 4; i++) {
+      for (let n = Math.ceil((T - WINDOW) / STEP); n * STEP <= T; n++) {
+        const tau = n * STEP;
+        if (tau < 0) continue;
+        const kk = Math.floor(tau);
+        if (kk >= G.nTurns) break;
+        const thrust = G.sims[kk].thrusts[i], dA = G.turnBy[kk][i];
+        for (const side of [-1, 1]) {
+          let e = thrust > 0 ? Math.min(2.4, thrust / 200) : 0;
+          if (thrust === 0 && side === (dA < 0 ? 1 : -1)) e = 0.45 * Math.min(1, Math.abs(dA) / 18);
+          if (e <= 0.01) continue;
+          const boost = thrust > 200;   // BOOST: a huge, long-lasting trail
+          const age = T - tau, life = boost ? 2.5 : 0.2 + 0.6 * Math.min(1.6, e);
+          if (age > life) continue;
+          const q = podPose(kk, tau - kk, i), r = q.a * Math.PI / 180, c = Math.cos(r), sn = Math.sin(r);
+          // the nozzle turns with its thruster
+          const ps = POD.scale[i >> 1], ty = thrusterYaw(kk, tau - kk, i) * Math.PI / 180, back = POD.nozzleX - POD.engineX;
+          const lx = (POD.engineX + back * Math.cos(ty)) * ps, ly = (side * POD.engineY + back * Math.sin(ty)) * ps;
+          const x = q.x + lx * c - ly * sn, y = q.y + lx * sn + ly * c;
+          const fade = 1 - age / life;
+          const size = boost ? 260 * (0.8 + 2.5 * age / life) : (45 + 55 * Math.min(1.6, e)) * (0.7 + 1.3 * age / life);
+          ctx.globalAlpha = (boost ? 1 : Math.min(0.8, 0.2 + 0.35 * e)) * fade;
+          ctx.drawImage(sheet, g[0], g[1], g[2], g[3], x - size / 2, y - size / 2, size, size);
+        }
+      }
+    }
+    ctx.restore();
+  }
+
+  // pods
+  for (let i = 0; i < 4; i++) {
+    const p = poses[i], team = i >> 1, rot = p.a * Math.PI / 180;
+    const act = k < G.nTurns ? G.acts[k][i] : null, sim = k < G.nTurns ? G.sims[k] : null;
+    ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(rot); ctx.scale(POD.scale[team], POD.scale[team]);
+    const engs = SPR.engine[team], cap = SPR.capsule[team];
+    const eh = POD.engineH, ew = eh * engs[0][2] / engs[0][3], chh = POD.capsuleH, cww = chh * cap[2] / cap[3];
+    // the thrusters show the steering input: turned by this turn's heading change (-18..18 degrees) relative to the
+    // pod, easing over from the previous turn's setting during the first 60% of the turn
+    const yaw = thrusterYaw(k, f, i) * Math.PI / 180, cy = Math.cos(yaw), sy = Math.sin(yaw);
+    // black cables from the back of each thruster (a point that turns with it) to the front of the capsule
+    ctx.strokeStyle = "#1a1210"; ctx.lineWidth = 10; ctx.lineCap = "round";
+    ctx.beginPath();
+    const cableX = POD.nozzleX + (team === 0 ? 85 : 25);   // orange thrusters taper at the back: attach further up
+    for (const side of [-1, 1]) {
+      const dx = cableX - POD.engineX, dy = side * POD.engineY * -0.15;   // attachment point relative to the thruster centre
+      ctx.moveTo(POD.engineX + dx * cy - dy * sy, side * POD.engineY + dx * sy + dy * cy);
+      ctx.lineTo(POD.capsuleX + chh / 2 - 35, side * 22);
+    }
+    ctx.stroke();
+    // electric arc between the centres of the two thrusters (drawn below them, so it shows in the gap)
+    {
+      // two arcs on different frames, each frame flipped at random and shifted sideways a little: a thick, jumpy bolt.
+      // The jitter comes from the frame number, so a paused replay shows a still arc.
+      const ax = POD.engineX, y1 = -POD.engineY, y2 = POD.engineY, len = y2 - y1;
+      const tick = Math.floor(T * 12) + i * 7;   // 12 frame changes per turn: 72 per second at x1
+      for (let layer = 0; layer < 1; layer++) {   // one bolt (a second, fainter layer was tried and dropped)
+        const h = ((tick + layer * 5) * 2654435761) >>> 0;            // cheap hash of the frame number
+        const b = SPR.beam[(h >>> 8) % SPR.beam.length];
+        const flip = (h & 1) ? -1 : 1, shift = 0, thick = layer ? 70 : 110;
+        ctx.save(); ctx.translate(ax + shift, 0); ctx.rotate(Math.PI / 2); ctx.scale(1, flip);
+        ctx.globalAlpha = layer ? .6 : .95;
+        ctx.drawImage(sheet, b[0], b[1], b[2], b[3], -len / 2 - 15, -thick / 2, len + 30, thick); ctx.restore();
+      }
+    }
+    // sprites face up (-y); rotate them to face +x
+    for (const side of [-1, 1]) {   // side -1 is the pod's left (the sprite's left side after the rotation)
+      const eng = engs[side < 0 ? 0 : 1];
+      ctx.save(); ctx.translate(POD.engineX, side * POD.engineY); ctx.rotate(Math.PI / 2 + yaw);
+      ctx.drawImage(sheet, eng[0], eng[1], eng[2], eng[3], -ew / 2, -eh / 2, ew, eh); ctx.restore();
+    }
+    ctx.save(); ctx.translate(POD.capsuleX, 0); ctx.rotate(Math.PI / 2);
+    ctx.drawImage(sheet, cap[0], cap[1], cap[2], cap[3], -cww / 2, -chh / 2, cww, chh); ctx.restore();
+    ctx.restore();
+
+    // shield bubble: full on the turn it is raised, faint while thrust is blocked
+    const ex = info.extras[i];
+    const raised = act && act.kind === "shield";
+    const cooldown = !raised && ex.shieldTimer > 0;
+    if ($("oFx").checked && (raised || cooldown)) sprite(SPR.shield[team], p.x, p.y, 826, 826, 0, raised ? .95 : .3);   // ring (180 of 186 px) = 800 units
+
+    if ($("oHit").checked) {
+      ctx.strokeStyle = "rgba(255,255,255,.7)"; ctx.lineWidth = 14;
+      ctx.beginPath(); ctx.arc(p.x, p.y, 400, 0, Math.PI * 2); ctx.stroke();
+    }
+    if ($("oThrust").checked && sim) {
+      const th = sim.thrusts[i];
+      if (th > 0) {
+        const len = 500 + th * 4.5, ar = sim.end.angle[i] * Math.PI / 180;
+        const x2 = p.x + Math.cos(ar) * len, y2 = p.y + Math.sin(ar) * len;
+        ctx.strokeStyle = th > 200 ? "#fff" : COLORS[team]; ctx.lineWidth = th > 200 ? 50 : 30;
+        ctx.beginPath(); ctx.moveTo(p.x + Math.cos(ar) * 450, p.y + Math.sin(ar) * 450); ctx.lineTo(x2, y2); ctx.stroke();
+        ctx.save(); ctx.translate(x2, y2); ctx.rotate(ar); ctx.fillStyle = ctx.strokeStyle;
+        ctx.beginPath(); ctx.moveTo(90, 0); ctx.lineTo(-90, -90); ctx.lineTo(-90, 90); ctx.fill(); ctx.restore();
+      }
+    }
+    // label
+    ctx.font = "bold 260px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+    ctx.lineWidth = 50; ctx.strokeStyle = "rgba(0,0,0,.65)"; ctx.fillStyle = COLORS[team];
+    const lbl = `${team ? "B" : "A"}${(i & 1) + 1}`;
+    if ($("oNames").checked) { ctx.strokeText(lbl, p.x, p.y - 470); ctx.fillText(lbl, p.x, p.y - 470); }
+    if ($("oRank").checked) {
+      const rk = ["1st", "2nd", "3rd", "4th"][ranks[i] - 1];
+      ctx.save(); ctx.font = "bold 280px system-ui, sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
+      ctx.fillStyle = COLORS[team];
+      ctx.strokeText(rk, p.x + 480, p.y); ctx.fillText(rk, p.x + 480, p.y); ctx.restore();
+    }
+    if ($("oMsg").checked && act && act.message) {
+      ctx.font = "220px system-ui, sans-serif"; ctx.fillStyle = "#fff";
+      ctx.strokeText(act.message, p.x, p.y - 760); ctx.fillText(act.message, p.x, p.y - 760);
+    }
+  }
+
+  // collisions: a flash at the impact point and sparks flying out, scaled with the collision's impulse. The strength
+  // grows with the log of the impulse: 120 (the minimum the referee applies) is a light touch, 1500 and above is the
+  // full effect. Spark directions come from a seeded random generator, so the same collision always looks the same.
+  if ($("oFx").checked) {
+    const FLASH = 0.3, SPARK = 0.7;
+    for (let kk = k - 1; kk <= k; kk++) {
+      if (kk < 0 || kk >= G.nTurns) continue;
+      for (const c of G.sims[kk].collisions) {
+        const age = (kk === k ? f : 1 + f) - c.t;   // turns since the collision
+        if (age < 0 || age > SPARK) continue;
+        const s = Math.max(0, Math.min(1, Math.log(c.force / 120) / Math.log(1500 / 120)));
+        ctx.save(); ctx.globalCompositeOperation = "lighter";
+        if (age < FLASH) {
+          const fl = SPR.lampFx[0][Math.min(13, Math.floor(age / FLASH * 14))], fs = 200 + 800 * s;
+          ctx.globalAlpha = (0.6 + 0.4 * s) * (1 - age / FLASH);
+          ctx.drawImage(sheet, fl[0], fl[1], fl[2], fl[3], c.x - fs / 2, c.y - fs * fl[3] / fl[2] / 2, fs, fs * fl[3] / fl[2]);
+        }
+        let seed = (Math.floor(c.t * 1e6) + kk * 7919 + c.a * 31 + c.b) >>> 0;
+        const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+        const n = Math.round(3 + 17 * s), sp = SPR.spark, u = age / SPARK, w = 44 * (0.5 + 0.5 * s);
+        ctx.globalAlpha = 1 - u * u;
+        for (let j = 0; j < n; j++) {
+          const ang = rnd() * Math.PI * 2, speed = (700 + 1500 * rnd()) * (0.25 + 0.95 * s);
+          const d = speed * SPARK * (u - u * u / 2), len = (120 + 180 * rnd() * (1 - u)) * (0.45 + 0.55 * s);
+          ctx.save(); ctx.translate(c.x + Math.cos(ang) * d, c.y + Math.sin(ang) * d); ctx.rotate(ang + Math.PI / 2);
+          ctx.drawImage(sheet, sp[0], sp[1], sp[2], sp[3], -w / 2, -len / 2, w, len); ctx.restore();
+        }
+        ctx.restore();
+      }
+    }
+  }
+
+  // HUD
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  const u = Math.max(cw / 1600, 0.8 * (window.devicePixelRatio || 1));   // HUD stays readable on small screens
+  for (let team = 0; team < 2; team++) {
+    const x0 = team ? cw - 330 * u - 12 * u : 12 * u, y0 = 12 * u, w = 330 * u, h = 78 * u;
+    ctx.fillStyle = "rgba(10,12,16,.72)"; ctx.beginPath(); ctx.roundRect(x0, y0, w, h, 8 * u); ctx.fill();
+    ctx.fillStyle = COLORS[team]; ctx.fillRect(x0, y0, 5 * u, h);
+    ctx.font = `600 ${17 * u}px system-ui, sans-serif`; ctx.textAlign = "left"; ctx.textBaseline = "top";
+    const pl = G.log.players[team];
+    const won = G.log.winner === team && k >= G.nTurns;
+    ctx.fillText((won ? "🏆 " : "") + pl.name, x0 + 14 * u, y0 + 9 * u);
+    ctx.font = `${13 * u}px system-ui, sans-serif`; ctx.fillStyle = "#c9ccd3";
+    for (let j = 0; j < 2; j++) {
+      const i = team * 2 + j, p = info.passed[i];
+      const lap = Math.min(G.laps, Math.floor(p / G.ncp) + 1);
+      const ex = info.extras[i];
+      const tags = [ex.boostUsed ? "" : "boost ready", ex.shieldTimer > 0 ? `shield ${ex.shieldTimer}` : ""].filter(Boolean).join(" · ");
+      ctx.fillText(`${team ? "B" : "A"}${j + 1}  lap ${lap}/${G.laps}  cp ${p}/${G.total}${tags ? "  · " + tags : ""}`, x0 + 14 * u, y0 + (34 + 19 * j) * u);
+    }
+    const to = info.timeout[team];
+    ctx.textAlign = "right"; ctx.fillStyle = to <= 20 ? "#ff7a7a" : "#8a8f9a";
+    ctx.fillText(`timeout ${to}`, x0 + w - 10 * u, y0 + 11 * u);
+  }
+  if (k >= G.nTurns) {
+    const w = G.log.winner;
+    const msg = w >= 0 ? `${G.log.players[w].name} wins` : "no winner";
+    ctx.font = `700 ${40 * u}px system-ui, sans-serif`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.lineWidth = 8 * u; ctx.strokeStyle = "rgba(0,0,0,.7)"; ctx.fillStyle = w >= 0 ? COLORS[w] : "#fff";
+    ctx.strokeText(msg, cw / 2, ch - 70 * u); ctx.fillText(msg, cw / 2, ch - 70 * u);
+    if (G.reason) {
+      ctx.font = `${18 * u}px system-ui, sans-serif`; ctx.fillStyle = "#fff"; ctx.lineWidth = 5 * u;
+      ctx.strokeText(G.reason, cw / 2, ch - 35 * u); ctx.fillText(G.reason, cw / 2, ch - 35 * u);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------------------------- time chart
+const tc = $("timechart"), tctx = tc.getContext("2d");
+function drawChart() {
+  const r = tc.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  tc.width = Math.round(r.width * dpr); tc.height = Math.round(r.height * dpr);
+  const w = tc.width, h = tc.height;
+  tctx.clearRect(0, 0, w, h);
+  if (!G || !G.nTurns) return;
+  const all = G.ms.flatMap((m) => m.filter((v) => v != null));
+  const max = Math.max(1, ...all.slice(2));   // ignore the long first turn for the scale
+  const pad = 4 * dpr;
+  const x = (k) => pad + (w - 2 * pad) * (k / Math.max(1, G.nTurns - 1));
+  const y = (v) => h - pad - (h - 2 * pad - 12 * dpr) * Math.min(1, v / max);
+  tctx.font = `${10 * dpr}px system-ui`; tctx.fillStyle = "#737987"; tctx.textBaseline = "top";
+  tctx.fillText(`ms per turn (scale ${max.toFixed(0)} ms; turn 1 off-scale if longer)`, pad, 2 * dpr);
+  for (let p = 0; p < 2; p++) {
+    tctx.strokeStyle = COLORS[p]; tctx.lineWidth = 1.5 * dpr; tctx.beginPath();
+    G.ms.forEach((m, k) => { if (m[p] == null) return; k ? tctx.lineTo(x(k), y(m[p])) : tctx.moveTo(x(k), y(m[p])); });
+    tctx.stroke();
+  }
+  const k = Math.min(Math.floor(T), G.nTurns - 1);
+  tctx.strokeStyle = "rgba(255,255,255,.6)"; tctx.lineWidth = 1 * dpr;
+  tctx.beginPath(); tctx.moveTo(x(k), 0); tctx.lineTo(x(k), h); tctx.stroke();
+}
+tc.addEventListener("click", (e) => {
+  if (!G) return;
+  const r = tc.getBoundingClientRect();
+  seek(Math.round((e.clientX - r.left) / r.width * (G.nTurns - 1)));
+});
+
+// ---------------------------------------------------------------------------------------------- side panel
+function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+let lastPanelTurn = -1;
+function updatePanel() {
+  if (!G) return;
+  const k = Math.min(Math.floor(T), G.nTurns);
+  $("turnlbl").textContent = k >= G.nTurns ? `end (${G.nTurns})` : `turn ${k + 1} / ${G.nTurns}`;
+  $("slider").value = T;
+  if (k === lastPanelTurn) return;
+  lastPanelTurn = k;
+  drawChart();
+  const st = G.states[k], info = G.podInfo[k];
+  let rows = `<tr><th>pod</th><th>x</th><th>y</th><th>vx</th><th>vy</th><th>angle</th><th>next</th><th>cp</th><th>speed</th></tr>`;
+  for (let i = 0; i < 4; i++) {
+    const sp = Math.hypot(st.vx[i], st.vy[i]);
+    rows += `<tr><td><span class="dot" style="background:${COLORS[i >> 1]}"></span> ${i >> 1 ? "B" : "A"}${(i & 1) + 1}</td>` +
+      `<td class="mono">${st.x[i]}</td><td class="mono">${st.y[i]}</td><td class="mono">${st.vx[i]}</td><td class="mono">${st.vy[i]}</td>` +
+      `<td class="mono">${st.angle[i]}</td><td class="mono">${st.next[i]}</td><td class="mono">${info.passed[i]}</td><td class="mono">${sp.toFixed(0)}</td></tr>`;
+  }
+  $("podtable").innerHTML = rows;
+  for (let p = 0; p < 2; p++) {
+    const pl = G.log.players[p];
+    let html = `<h3><span class="dot" style="background:${COLORS[p]}"></span>${esc(pl.name)}<span class="sub mono" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60%" title="${esc(pl.cmd || "")}">${esc(pl.cmd || "")}</span></h3>`;
+    if (k >= G.nTurns) {
+      html += `<div class="k">game over</div>`;
+    } else {
+      const t = G.log.turns[k];
+      const ms = t.ms[p];
+      const limit = k > 0 ? CG_TURN_MS : CG_FIRST_TURN_MS, over = ms > limit;
+      html += `<div class="k">stdout <span class="${over ? "warn" : ""}">· ${ms == null ? "–" : ms.toFixed(1) + " ms"}${over ? ` (over CodinGame's ${limit} ms)` : ""}</span></div>`;
+      html += `<div class="io">${t.out[p] ? t.out[p].map(esc).join("\n") : "(not asked: game over)"}</div>`;
+      html += `<div class="k">stdin</div><div class="io">${t.in[p] ? t.in[p].map(esc).join("\n") : "–"}</div>`;
+      const err = (k === 0 ? (G.log.init_err?.[p] || []) : []).concat(t.err?.[p] || []);
+      html += `<div class="k">stderr (${err.length} lines)</div><div class="io err">${err.length ? err.map(esc).join("\n") : "–"}</div>`;
+    }
+    $("pl" + p).innerHTML = html;
+  }
+}
+
+function gameInfo() {
+  const L = G.log, w = L.winner;
+  const avg = (p) => { const v = G.ms.slice(1).map((m) => m[p]).filter((x) => x != null); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : 0; };
+  const mx = (p) => Math.max(0, ...G.ms.slice(1).map((m) => m[p] ?? 0));
+  $("gameinfo").innerHTML =
+    `<b title="${esc(L.players[0].cmd || "")}">${esc(L.players[0].name)}</b> vs <b title="${esc(L.players[1].cmd || "")}">${esc(L.players[1].name)}</b> · seed <span class="mono">${L.seed}</span> · ${L.date || ""}<br>` +
+    `Winner: <b style="color:${w >= 0 ? COLORS[w] : "inherit"}">${w >= 0 ? esc(L.players[w].name) : "none"}</b> after ${G.nTurns} turns${G.reason ? " · " + G.reason : ""}<br>` +
+    `${G.ncp} checkpoints × ${G.laps} laps · time (after turn 1) avg/max: ` +
+    `<span style="color:${COLORS[0]}">${avg(0).toFixed(1)}/${mx(0).toFixed(1)}</span> · <span style="color:${COLORS[1]}">${avg(1).toFixed(1)}/${mx(1).toFixed(1)}</span> ms<br>` +
+    (G.mismatches ? `<span class="warn">Viewer physics differs from the log on ${G.mismatches} pod-turns (first at turn ${G.firstMismatch + 1}); only the animation within those turns is affected.</span>`
+                  : `<span style="color:var(--good)">Viewer physics matches the log on every turn.</span>`);
+}
+
+// ---------------------------------------------------------------------------------------------- playback
+function seek(t) {
+  if (!G) return;
+  T = Math.max(0, Math.min(G.nTurns, t));
+  draw(); updatePanel();
+}
+function setPlaying(on) {
+  playing = on && !!G;
+  $("bPlay").textContent = playing ? "⏸" : "▶";
+  if (playing && T >= G.nTurns) T = 0;
+  lastTs = null;
+  if (playing) requestAnimationFrame(tick);
+}
+let lastTs = null;
+const TURNS_PER_SECOND = 6;   // at x1
+function tick(ts) {
+  if (!playing) return;
+  if (lastTs != null) {
+    T += (ts - lastTs) / 1000 * TURNS_PER_SECOND * +$("speed").value;
+    if (T >= G.nTurns) { T = G.nTurns; setPlaying(false); }
+  }
+  lastTs = ts;
+  draw(); updatePanel();
+  if (playing) requestAnimationFrame(tick);
+}
+$("bPlay").onclick = () => setPlaying(!playing);
+$("bStart").onclick = () => { setPlaying(false); seek(0); };
+$("bEnd").onclick = () => { setPlaying(false); seek(G ? G.nTurns : 0); };
+$("bPrev").onclick = () => { setPlaying(false); seek(Math.ceil(T) - 1); };
+$("bNext").onclick = () => { setPlaying(false); seek(Math.floor(T) + 1); };
+$("slider").oninput = (e) => { setPlaying(false); seek(+e.target.value); };
+$("speed").onchange = () => store.set("speedMult", $("speed").value);
+for (const id of ["oTrails", "oThrust", "oHit", "oTarget", "oNames", "oRank", "oMsg", "oFx"]) {
+  $(id).checked = store.get(id, $(id).checked);
+  $(id).onchange = () => { store.set(id, $(id).checked); draw(); };
+}
+$("speed").value = store.get("speedMult", "1");
+if (!$("speed").value) $("speed").value = "1";
+function toggleFullscreen() {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else $("player").requestFullscreen().catch((e) => status("fullscreen refused: " + e.message, true));
+}
+$("bFull").onclick = toggleFullscreen;
+document.addEventListener("fullscreenchange", () => { $("bFull").textContent = document.fullscreenElement ? "✕" : "⛶"; });
+document.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "INPUT" && e.target.type !== "range" && e.target.type !== "checkbox") return;
+  if (e.key === " ") { e.preventDefault(); setPlaying(!playing); }
+  else if (e.key === "ArrowRight") { e.preventDefault(); $("bNext").click(); }
+  else if (e.key === "ArrowLeft") { e.preventDefault(); $("bPrev").click(); }
+  else if (e.key === "Home") $("bStart").click();
+  else if (e.key === "End") $("bEnd").click();
+  else if (e.key === "f" || e.key === "F") toggleFullscreen();
+});
+
+// ---------------------------------------------------------------------------------------------- loading / playing games
+function status(msg, err = false) { $("status").textContent = msg; $("status").className = err ? "err" : ""; }
+
+async function loadReplay(file) {
+  status("loading " + file + " …");
+  try {
+    const r = await fetch("/api/replay?file=" + encodeURIComponent(file));
+    if (!r.ok) throw new Error(r.status + " " + r.statusText);
+    const log = await r.json();
+    if (!log.turns || !log.turns.length) throw new Error("the replay has no turns (" + (log.note || "?") + ")");
+    G = prepare(log);
+    window.viewerGame = G;   // for debugging from the console
+    lastPanelTurn = -1;
+    $("empty").style.display = "none";
+    $("slider").max = G.nTurns;
+    gameInfo(); seek(0);
+    $("replays").value = file;
+    history.replaceState(null, "", "#" + encodeURIComponent(file));
+    status("");
+    setPlaying(true);
+  } catch (e) { status("could not load: " + e.message, true); }
+}
+
+async function refreshReplays(select) {
+  const r = await fetch("/api/replays"); const list = await r.json();
+  const sel = $("replays");
+  sel.innerHTML = `<option value="">Saved replays (${list.length})…</option>` + list.map((x) => {
+    if (x.error) return `<option value="${esc(x.file)}">${esc(x.file)} (unreadable)</option>`;
+    const w = x.winner >= 0 ? (x.winner ? "  ← wins" : "") : "";
+    const lbl = `${x.date.slice(5, 16)}  ${x.players[0]}${x.winner === 0 ? "★" : ""} vs ${x.players[1]}${x.winner === 1 ? "★" : ""}  · ${x.turns} t · seed ${x.seed}`;
+    return `<option value="${esc(x.file)}">${esc(lbl)}</option>`;
+  }).join("");
+  if (select) sel.value = select;
+}
+$("replays").onchange = (e) => { if (e.target.value) loadReplay(e.target.value); };
+$("reload").onclick = () => refreshReplays($("replays").value);
+
+// bot commands: the last ones used are remembered (per browser) and offered in the inputs' dropdown
+function recentCommands() { const v = store.get("recentCmds", []); return Array.isArray(v) ? v : []; }
+function rememberCommands(cmds) {
+  const list = [...cmds, ...recentCommands().filter((c) => !cmds.includes(c))].slice(0, 20);
+  store.set("recentCmds", list);
+  $("cmdlist").innerHTML = list.map((c) => `<option value="${esc(c)}"></option>`).join("");
+}
+async function loadBots() {
+  rememberCommands([]);
+  $("botA").value = store.get("botA", "python examples/simple_bot.py");
+  $("botB").value = store.get("botB", "python examples/simple_bot.py");
+  try {
+    const cfg = await (await fetch("/api/config")).json();
+    $("dir").textContent = "commands run in " + cfg.dir;
+    $("dir").title = `a bot that takes longer than ${cfg.timeout} ms for a turn loses (server option --timeout)`;
+  } catch (e) { /* the page still works without it */ }
+}
+$("swap").onclick = () => { [$("botA").value, $("botB").value] = [$("botB").value, $("botA").value]; };
+$("play").onclick = async () => {
+  const req = { a: $("botA").value.trim(), b: $("botB").value.trim(), seed: $("seed").value };
+  store.set("botA", req.a); store.set("botB", req.b);
+  rememberCommands([req.a, req.b].filter(Boolean));
+  $("play").disabled = true;
+  const t0 = performance.now();
+  const timer = setInterval(() => status(`playing… ${((performance.now() - t0) / 1000).toFixed(0)} s`), 500);
+  status("playing…");
+  try {
+    const r = await fetch("/api/play", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(req) });
+    const res = await r.json();
+    if (!r.ok) throw new Error(res.error || r.statusText);
+    await refreshReplays(res.file);
+    await loadReplay(res.file);
+  } catch (e) { status("game failed: " + e.message, true); }
+  finally { clearInterval(timer); $("play").disabled = false; }
+};
+
+(async () => {
+  await Promise.all([loadBots(), refreshReplays()]);
+  const h = decodeURIComponent(location.hash.slice(1));
+  if (h) loadReplay(h);
+})();
+</script>
+</body>
+</html>
